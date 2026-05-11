@@ -1,0 +1,82 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH] rxrpc: Use skb_ensure_writable() before in-place
+ decryption
+From: Hyunwoo Kim <imv4bel@gmail.com>
+Date: Mon, 11 May 2026 03:51:05 +0900
+Message-Id: <agDTmXM2wXnJflYc@v4bel>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Writing to any frag is incorrect since frag pages can be shared.
+Use skb_ensure_writable() to ensure the skb is writable before
+in-place decryption.
+
+Fixes: aa54b1d27fe0 ("rxrpc: Also unshare DATA/RESPONSE packets when paged frags are present")
+Signed-off-by: Hyunwoo Kim <imv4bel@gmail.com>
+---
+ net/rxrpc/call_event.c | 18 ++----------------
+ net/rxrpc/conn_event.c | 23 +++++------------------
+ 2 files changed, 7 insertions(+), 34 deletions(-)
+
+--- a/net/rxrpc/call_event.c
++++ b/net/rxrpc/call_event.c
+@@ -334,22 +334,8 @@ bool rxrpc_input_call_event(struct rxrpc
+ 
+ 			if (sp->hdr.type == RXRPC_PACKET_TYPE_DATA &&
+ 			    sp->hdr.securityIndex != 0 &&
+-			    (skb_cloned(skb) ||
+-			     skb_has_frag_list(skb) ||
+-			     skb_has_shared_frag(skb))) {
+-				/* Unshare the packet so that it can be
+-				 * modified by in-place decryption.
+-				 */
+-				struct sk_buff *nskb = skb_copy(skb, GFP_ATOMIC);
+-
+-				if (nskb) {
+-					rxrpc_new_skb(nskb, rxrpc_skb_new_unshared);
+-					rxrpc_input_call_packet(call, nskb);
+-					rxrpc_free_skb(nskb, rxrpc_skb_put_call_rx);
+-				} else {
+-					/* OOM - Drop the packet. */
+-					rxrpc_see_skb(skb, rxrpc_skb_see_unshare_nomem);
+-				}
++			    skb_ensure_writable(skb, skb->len)) {
++				rxrpc_see_skb(skb, rxrpc_skb_see_unshare_nomem);
+ 			} else {
+ 				rxrpc_input_call_packet(call, skb);
+ 			}
+--- a/net/rxrpc/conn_event.c
++++ b/net/rxrpc/conn_event.c
+@@ -245,26 +245,13 @@ static int rxrpc_verify_response(struct
+ {
+ 	int ret;
+ 
+-	if (skb_cloned(skb) || skb_has_frag_list(skb) ||
+-	    skb_has_shared_frag(skb)) {
+-		/* Copy the packet if shared so that we can do in-place
+-		 * decryption.
+-		 */
+-		struct sk_buff *nskb = skb_copy(skb, GFP_NOFS);
+-
+-		if (nskb) {
+-			rxrpc_new_skb(nskb, rxrpc_skb_new_unshared);
+-			ret = conn->security->verify_response(conn, nskb);
+-			rxrpc_free_skb(nskb, rxrpc_skb_put_response_copy);
+-		} else {
+-			/* OOM - Drop the packet. */
+-			rxrpc_see_skb(skb, rxrpc_skb_see_unshare_nomem);
+-			ret = -ENOMEM;
+-		}
+-	} else {
+-		ret = conn->security->verify_response(conn, skb);
++	if (skb_ensure_writable(skb, skb->len)) {
++		rxrpc_see_skb(skb, rxrpc_skb_see_unshare_nomem);
++		return -ENOMEM;
+ 	}
+ 
++	ret = conn->security->verify_response(conn, skb);
++
+ 	return ret;
+ }
+ 
